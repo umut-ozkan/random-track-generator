@@ -252,6 +252,21 @@ class TrackGenerator:
         cones_left = M.dot(np.c_[cones_left, np.ones(len(cones_left))].T)[:-1].T
         cones_right = M.dot(np.c_[cones_right, np.ones(len(cones_right))].T)[:-1].T
 
+        # Find the minimum bounds of the entire track including cones
+        all_x = np.concatenate([x_m, cones_left[:, 0], cones_right[:, 0]])
+        all_y = np.concatenate([y_m, cones_left[:, 1], cones_right[:, 1]])
+        x_min, y_min = all_x.min(), all_y.min()
+
+        # Determine the shift required to make all coordinates positive, with a 5m buffer
+        x_shift = -x_min + 5 if x_min < 0 else 0
+        y_shift = -y_min + 5 if y_min < 0 else 0
+
+        # Apply the shift to all track data
+        x_m += x_shift
+        y_m += y_shift
+        cones_left += [x_shift, y_shift]
+        cones_right += [x_shift, y_shift]
+
         # Create track file
         if self._visualise_voronoi: self.visualise_voronoi(vor, sorted_vertices, random_point_indices, input_points, x, y)
         if self._plot_track: self.plot_track(cones_left, cones_right)
