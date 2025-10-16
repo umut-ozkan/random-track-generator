@@ -41,10 +41,10 @@ class TrackGenerator:
 
         # Track parameters
         self._track_width = 3.                                                  # [m]
-        self._cone_spacing = 5.                                                 # [m]
-        self._length_start_area = 6.                                            # [m]
-        self._curvature_threshold = 1. / 3.75                                   # [m^-1]
-        self._straight_threshold = 1. / 100.                                    # [m^-1]
+        self._boundary_point_spacing = 10.0                                     # [m]
+        self._length_start_area = 20.0                                          # [m]
+        self._curvature_threshold = 1. / 25.0                                   # [m^-1]
+        self._straight_threshold = 1. / 500.0                                   # [m^-1]
 
         # Output options
         self._plot_track = plot_track
@@ -195,13 +195,13 @@ class TrackGenerator:
                 if track.geom_type == track_left.geom_type == track_right.geom_type == 'Polygon':
                     break
 
-        # Calculate cone spacing        
-        cone_spacing_left = np.linspace(0, track_left.length, np.ceil(track_left.length / self._track_width).astype(int) + 1)[:-1]
-        cone_spacing_right= np.linspace(0, track_right.length, np.ceil(track_right.length / self._track_width).astype(int) + 1)[:-1]
-            
-        # Determine coordinates of cones
-        cones_left = np.asarray([np.asarray(track_left.exterior.interpolate(sp).xy).flatten() for sp in cone_spacing_left])
-        cones_right = np.asarray([np.asarray(track_right.exterior.interpolate(sp).xy).flatten() for sp in cone_spacing_right])
+        # Calculate boundary point spacing
+        boundary_point_spacing_left = np.linspace(0, track_left.length, np.ceil(track_left.length / self._track_width).astype(int) + 1)[:-1]
+        boundary_point_spacing_right= np.linspace(0, track_right.length, np.ceil(track_right.length / self._track_width).astype(int) + 1)[:-1]
+
+        # Determine coordinates of boundary points
+        boundary_points_left = np.asarray([np.asarray(track_left.exterior.interpolate(sp).xy).flatten() for sp in boundary_point_spacing_left])
+        boundary_points_right = np.asarray([np.asarray(track_right.exterior.interpolate(sp).xy).flatten() for sp in boundary_point_spacing_right])
 
         # Find straight section in track that is at least the length of the start area
         # If such a section cannot be found, adjust the straight_threshold and length_start_area variables
@@ -248,13 +248,13 @@ class TrackGenerator:
         transformed_unwrapped_heading = unwrapped_heading - rotation_angle
         heading_rad_transformed = (transformed_unwrapped_heading + np.pi) % (2 * np.pi) - np.pi
 
-        # 5. Transform cones (for other output types)
-        cones_left = M.dot(np.c_[cones_left, np.ones(len(cones_left))].T)[:-1].T
-        cones_right = M.dot(np.c_[cones_right, np.ones(len(cones_right))].T)[:-1].T
+        # 5. Transform boundary points (for other output types)
+        boundary_points_left = M.dot(np.c_[boundary_points_left, np.ones(len(boundary_points_left))].T)[:-1].T
+        boundary_points_right = M.dot(np.c_[boundary_points_right, np.ones(len(boundary_points_right))].T)[:-1].T
 
-        # Find the minimum bounds of the entire track including cones
-        all_x = np.concatenate([x_m, cones_left[:, 0], cones_right[:, 0]])
-        all_y = np.concatenate([y_m, cones_left[:, 1], cones_right[:, 1]])
+        # Find the minimum bounds of the entire track including boundary points
+        all_x = np.concatenate([x_m, boundary_points_left[:, 0], boundary_points_right[:, 0]])
+        all_y = np.concatenate([y_m, boundary_points_left[:, 1], boundary_points_right[:, 1]])
         x_min, y_min = all_x.min(), all_y.min()
 
         # Determine the shift required to make all coordinates positive, with a 5m buffer
@@ -264,16 +264,16 @@ class TrackGenerator:
         # Apply the shift to all track data
         x_m += x_shift
         y_m += y_shift
-        cones_left += [x_shift, y_shift]
-        cones_right += [x_shift, y_shift]
+        boundary_points_left += [x_shift, y_shift]
+        boundary_points_right += [x_shift, y_shift]
 
         # Create track file
         if self._visualise_voronoi: self.visualise_voronoi(vor, sorted_vertices, random_point_indices, input_points, x, y)
-        if self._plot_track: self.plot_track(cones_left, cones_right)
+        if self._plot_track: self.plot_track(boundary_points_left, boundary_points_right)
         if self._create_output_file:
             track_data = {
-                'cones_left': cones_left,
-                'cones_right': cones_right,
+                'boundary_points_left': boundary_points_left,
+                'boundary_points_right': boundary_points_right,
                 'x_m': x_m,
                 'y_m': y_m,
                 'w_tr_right_m': self._track_width / 2.0,
@@ -322,22 +322,23 @@ class TrackGenerator:
         plt.legend()
         plt.show()
 
-    def plot_track(self, cones_left, cones_right):
+    def plot_track(self, boundary_left, boundary_right):
         """
         Plots the resulting track. The car will start at the origin.
 
-        Args: 
-            cones_left (numpy.ndarray): Nx2 numpy array of left cone coordinates.
-            cones_right (numpy.ndarray): Nx2 numpy array of right cone coordinates.       
+        Args:
+            boundary_left (numpy.ndarray): Nx2 numpy array of left boundary point coordinates.
+            boundary_right (numpy.ndarray): Nx2 numpy array of right boundary point coordinates.
         """
         plt.figure()
-        plt.scatter(*cones_left.T, color='b', s=1)
-        plt.scatter(*cones_right.T, color='y', s=1)
+        plt.plot(boundary_left[:, 0], boundary_left[:, 1], 'k-', label='Track Limits')
+        plt.plot(boundary_right[:, 0], boundary_right[:, 1], 'k-')
 
         plt.xlabel('x [m]')
         plt.ylabel('y [m]')
         plt.axis('equal')
         plt.grid()
+        plt.legend()
         plt.show()
         
     def create_output_file(self, track_data):
@@ -353,8 +354,8 @@ class TrackGenerator:
             print(f"Saving FSSIM track to {track_file_name}")
             with open(track_file_name, 'w') as outfile:
                 data = {
-                    'cones_left': track_data['cones_left'].tolist(),
-                    'cones_right': track_data['cones_right'].tolist(),
+                    'cones_left': track_data['boundary_points_left'].tolist(),
+                    'cones_right': track_data['boundary_points_right'].tolist(),
                     'cones_orange': [],
                     'cones_orange_big': [[4.7, 2.5], [4.7, -2.5], [7.3, 2.5], [7.3, -2.5]],
                     'starting_pose_cg': [0., 0., 0.],
@@ -367,11 +368,11 @@ class TrackGenerator:
             track_file_name = os.path.join(track_file_dir, f'track_{self._track_id}.csv')
             print(f"Saving FSDS track to {track_file_name}")
             with open(track_file_name, 'w') as outfile:
-                for cone in track_data['cones_left']:
-                    outfile.write("blue," + str(cone[0]) + ',' + str(cone[1]) + ',0,0.01,0.01,0\n')
+                for boundary_point in track_data['boundary_points_left']:
+                    outfile.write("blue," + str(boundary_point[0]) + ',' + str(boundary_point[1]) + ',0,0.01,0.01,0\n')
 
-                for cone in track_data['cones_right']:
-                    outfile.write("yellow," + str(cone[0]) + ',' + str(cone[1]) + ',0,0.01,0.01,0\n')
+                for boundary_point in track_data['boundary_points_right']:
+                    outfile.write("yellow," + str(boundary_point[0]) + ',' + str(boundary_point[1]) + ',0,0.01,0.01,0\n')
 
                 outfile.write("big_orange,4.7,2.2,0,0.01,0.01,0\n")
                 outfile.write("big_orange,4.7,-2.2,0,0.01,0.01,0\n")
@@ -389,14 +390,14 @@ class TrackGenerator:
             gpx.tracks.append(gpx_track)
 
             # Create points:
-            for cone in track_data['cones_left']:
-                lat  = self._lat_offset  + (cone[1] / 6378100) * (180 / math.pi)
-                lon = self._lon_offset + (cone[0] / 6378100) * (180 / math.pi) / math.cos(self._lat_offset * math.pi/180)
+            for boundary_point in track_data['boundary_points_left']:
+                lat  = self._lat_offset  + (boundary_point[1] / 6378100) * (180 / math.pi)
+                lon = self._lon_offset + (boundary_point[0] / 6378100) * (180 / math.pi) / math.cos(self._lat_offset * math.pi/180)
                 gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, elevation=0 + self._z_offset))
 
-            for cone in track_data['cones_right']:
-                lat  = self._lat_offset  + (cone[1] / 6378100) * (180 / math.pi)
-                lon = self._lon_offset + (cone[0] / 6378100) * (180 / math.pi) / math.cos(self._lat_offset * math.pi/180)
+            for boundary_point in track_data['boundary_points_right']:
+                lat  = self._lat_offset  + (boundary_point[1] / 6378100) * (180 / math.pi)
+                lon = self._lon_offset + (boundary_point[0] / 6378100) * (180 / math.pi) / math.cos(self._lat_offset * math.pi/180)
                 gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, elevation=0 + self._z_offset))
 
             with open(track_file_name, 'w') as outfile:
