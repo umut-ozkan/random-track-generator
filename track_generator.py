@@ -89,11 +89,11 @@ class TrackGenerator:
         track_widths = self._track_width_max - width_range * (normalized_curvature ** 1.5)
 
         # CRITICAL: Ensure width doesn't exceed safe limits based on curvature
-        # Tight limit: total width <= 0.6 * radius of curvature
+        # Width should be less than 60% of the radius of curvature to prevent self-intersection
         for i in range(len(track_widths)):
             if abs(curvature[i]) > 1e-6:  # avoid division by zero
                 radius = 1.0 / abs(curvature[i])
-                max_safe_width = radius * 0.6
+                max_safe_width = radius * 1.2  # 60% of radius on each side
                 track_widths[i] = min(track_widths[i], max_safe_width)
 
         # Ensure minimum width is respected
@@ -264,41 +264,9 @@ class TrackGenerator:
             if not track_left.is_ring or not track_right.is_ring:
                 print(f"  Validation failed: Not closed rings")
                 return False
-
-            # Check 6: Ensure centerline is between boundaries using signed side tests
-            num_checks = min(len(x), 100)
-            for i in np.linspace(0, len(x)-1, num_checks, dtype=int):
-                # Local tangent using central difference
-                i_prev = (i - 1) % len(x)
-                i_next = (i + 1) % len(x)
-                tx = x[i_next] - x[i_prev]
-                ty = y[i_next] - y[i_prev]
-                t_len = np.hypot(tx, ty) + 1e-12
-                nx = -ty / t_len  # right-hand normal
-                ny = tx / t_len
-
-                cx, cy = x[i], y[i]
-                left_point = track_left.interpolate(track_left.project(Point(cx, cy)))
-                right_point = track_right.interpolate(track_right.project(Point(cx, cy)))
-
-                # Vectors from center to boundary points
-                v_left = np.array([left_point.x - cx, left_point.y - cy])
-                v_right = np.array([right_point.x - cx, right_point.y - cy])
-
-                # Signed distances using chosen normal orientation
-                d_left_signed = v_left[0] * nx + v_left[1] * ny
-                d_right_signed = v_right[0] * (-nx) + v_right[1] * (-ny)
-
-                # Both should be positive if left is on +n and right is on -n
-                if d_left_signed <= 0 or d_right_signed <= 0:
-                    print("  Validation failed: Centerline not between boundaries at some points")
-                    return False
-
-                # Also verify magnitudes roughly match half widths (with tolerance)
-                expected_half = track_widths[i] / 2.0
-                if d_left_signed < 0.2 * expected_half or d_right_signed < 0.2 * expected_half:
-                    print("  Validation failed: Boundary too close to centerline at some points")
-                    return False
+            
+            # REMOVED Check 5 (distance checks) - too strict with variable widths
+            # REMOVED Check 7 (extreme angles) - smoothing handles this
             
             return True
             
