@@ -29,9 +29,9 @@ def plot_track_from_csv(file_path):
     y_center = track_df['y_m']
     heading = track_df['heading_rad']
     
-    # Get the track width (assuming it's constant for visualization)
-    width_left = track_df['w_tr_left_m'].iloc[0]
-    width_right = track_df['w_tr_right_m'].iloc[0]
+    # Get per-point track widths
+    width_left = track_df['w_tr_left_m'].to_numpy()
+    width_right = track_df['w_tr_right_m'].to_numpy()
 
     # --- Calculate Track Boundaries ---
     # The heading vector is (cos(h), sin(h))
@@ -53,10 +53,20 @@ def plot_track_from_csv(file_path):
     # Plot centerline
     plt.plot(x_center, y_center, '--', color='gray', linewidth=1.5, label='Centerline')
     
-    # Plot Start/Finish line (track starts at (0,0) heading up)
-    start_x = [-width_right, width_left]
-    start_y = [0, 0]
-    plt.plot(start_x, start_y, color='green', linewidth=4, label='Start/Finish Line')
+    # Plot Start/Finish line at the first centerline point using heading and widths
+    x0 = float(x_center.iloc[0])
+    y0 = float(y_center.iloc[0])
+    h0 = float(heading.iloc[0])
+    wl0 = float(width_left[0])
+    wr0 = float(width_right[0])
+    # Normal vector to heading
+    nx = -np.sin(h0)
+    ny = np.cos(h0)
+    start_left_x = x0 + nx * wl0
+    start_left_y = y0 + ny * wl0
+    start_right_x = x0 - nx * wr0
+    start_right_y = y0 - ny * wr0
+    plt.plot([start_right_x, start_left_x], [start_right_y, start_left_y], color='green', linewidth=4, label='Start/Finish Line')
     
     # --- Formatting ---
     plt.axis('equal')  # Ensures the track aspect ratio is correct
