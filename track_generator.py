@@ -64,6 +64,7 @@ class TrackGenerator:
         """
         Calculate variable track width based on curvature.
         Straights get wider tracks, tight corners get narrower tracks.
+        Ensures width doesn't exceed safe limits based on radius of curvature.
 
         Args:
             curvature (numpy.ndarray): Curvature values along the track
@@ -87,6 +88,14 @@ class TrackGenerator:
         width_range = self._track_width_max - self._track_width_min
         track_widths = self._track_width_max - width_range * (normalized_curvature ** 1.5)
 
+        # CRITICAL: Ensure width doesn't exceed safe limits based on curvature
+        # Tight limit: total width <= 0.6 * radius of curvature
+        for i in range(len(track_widths)):
+            if abs(curvature[i]) > 1e-6:  # avoid division by zero
+                radius = 1.0 / abs(curvature[i])
+                max_safe_width = radius * 0.6
+                track_widths[i] = min(track_widths[i], max_safe_width)
+
         # Ensure minimum width is respected
         track_widths = np.maximum(track_widths, self._track_width_min)
 
@@ -95,6 +104,7 @@ class TrackGenerator:
     def _create_variable_width_boundary(self, x, y, half_widths, side='left'):
         """
         Create a boundary line parallel to the centerline with variable width.
+        Uses a more robust approach that prevents boundaries from touching.
 
         Args:
             x, y (numpy.ndarray): Centerline coordinates
@@ -104,63 +114,198 @@ class TrackGenerator:
         Returns:
             shapely.geometry.LineString: The boundary line
         """
-        # Create points for the boundary by offsetting perpendicular to the centerline
-        boundary_x = []
-        boundary_y = []
-
-        for i in range(len(x)):
-            # Get current point and tangent direction
+        # Create centerline
+        centerline = LineString(list(zip(x, y)))
+        
+        # For constant or near-constant width, use simple parallel offset
+        width_variation = np.std(half_widths) / np.mean(half_widths)
+        if width_variation < 0.05:  # Less than 5% variation
+            offset_distance = float(np.mean(half_widths))
+            if side == 'right':
+                offset_distance = -offset_distance
+            try:
+                boundary = centerline.parallel_offset(
+                    offset_distance, 
+                    'left' if offset_distance >= 0 else 'right',
+                    join_style=2,  # mitered join
+                    mitre_limit=2.0
+                )
+                if isinstance(boundary, LineString) and boundary.is_simple and boundary.is_ring:
+                    return boundary
+            except:
+                pass
+        
+        # For variable widths, use point-by-point offset with smoothing
+        boundary_points = []
+        
+        # Use more points for smoother boundaries
+        n_points = len(x)
+        
+        for i in range(n_points):
+            # Calculate tangent vector using neighboring points
             if i == 0:
-                # Use forward difference for first point
-                dx = x[1] - x[0]
-                dy = y[1] - y[0]
-            elif i == len(x) - 1:
-                # Use backward difference for last point
-                dx = x[-1] - x[-2]
-                dy = y[-1] - y[-2]
+                # Forward difference
+                dx = x[min(i+2, n_points-1)] - x[i]
+                dy = y[min(i+2, n_points-1)] - y[i]
+            elif i == n_points - 1:
+                # Backward difference
+                dx = x[i] - x[max(i-2, 0)]
+                dy = y[i] - y[max(i-2, 0)]
             else:
-                # Use central difference for middle points
-                dx = x[i+1] - x[i-1]
-                dy = y[i+1] - y[i-1]
-
-            # Normalize tangent vector
+                # Central difference with wider stencil for smoother tangent
+                i_prev = max(i-2, 0)
+                i_next = min(i+2, n_points-1)
+                dx = x[i_next] - x[i_prev]
+                dy = y[i_next] - y[i_prev]
+        
+            # Normalize tangent
             length = np.sqrt(dx*dx + dy*dy)
-            if length > 0:
+            if length > 1e-10:
                 dx_norm = dx / length
                 dy_norm = dy / length
             else:
-                dx_norm = 0
-                dy_norm = 0
-
-            # Perpendicular direction (rotate 90 degrees)
-            # For 'left' side: rotate clockwise (negative)
-            # For 'right' side: rotate counter-clockwise (positive)
+                # Skip degenerate points
+                if i > 0:
+                    boundary_points.append(boundary_points[-1])
+                continue
+        
+            # Perpendicular direction (rotate tangent by 90 degrees)
             if side == 'left':
                 perp_dx = dy_norm
                 perp_dy = -dx_norm
-            else:  # right side
+            else:
                 perp_dx = -dy_norm
                 perp_dy = dx_norm
-
-            # Offset point by half-width in perpendicular direction
+        
+            # Calculate offset point
             offset_x = x[i] + half_widths[i] * perp_dx
             offset_y = y[i] + half_widths[i] * perp_dy
+        
+            boundary_points.append([offset_x, offset_y])
+        
+        if len(boundary_points) < 3:
+            # Fallback to simple parallel offset
+            offset_distance = float(np.mean(half_widths))
+            if side == 'right':
+                offset_distance = -offset_distance
+            return centerline.parallel_offset(
+                offset_distance,
+                'left' if offset_distance >= 0 else 'right',
+                join_style=2
+            )
+        
+        # Convert to array for smoothing
+        boundary_array = np.array(boundary_points)
+        
+        # Apply smoothing in multiple passes with decreasing sigma
+        from scipy.ndimage import gaussian_filter1d
+        
+        # First pass: light smoothing
+        smoothed_x = gaussian_filter1d(boundary_array[:, 0], sigma=1.5, mode='wrap')
+        smoothed_y = gaussian_filter1d(boundary_array[:, 1], sigma=1.5, mode='wrap')
+        
+        boundary_array[:, 0] = smoothed_x
+        boundary_array[:, 1] = smoothed_y
+        
+        # Close the loop
+        boundary_array = np.vstack([boundary_array, boundary_array[0]])
+        
+        # Create LineString
+        line = LineString(boundary_array)
+        
+        # If the line self-intersects after smoothing, try without smoothing
+        if not line.is_simple:
+            boundary_array = np.array(boundary_points + [boundary_points[0]])
+            line = LineString(boundary_array)
+            
+            # If still not simple, reduce points
+            if not line.is_simple:
+                # Decimate points
+                step = max(1, len(boundary_points) // 200)
+                boundary_array = np.array(boundary_points[::step] + [boundary_points[0]])
+                line = LineString(boundary_array)
+        
+        return line
 
-            boundary_x.append(offset_x)
-            boundary_y.append(offset_y)
+    def _validate_track_geometry(self, track_left, track_right, track_widths, x, y):
+        """
+        Comprehensive validation of track geometry to catch corrupted tracks.
+        
+        Returns:
+            bool: True if track is valid, False if corrupted
+        """
+        try:
+            # Check 1: Boundaries must be LineStrings
+            if not isinstance(track_left, LineString) or not isinstance(track_right, LineString):
+                print(f"  Validation failed: Not LineStrings")
+                return False
+            
+            # Check 2: No self-intersections
+            if not track_left.is_simple or not track_right.is_simple:
+                print(f"  Validation failed: Self-intersections detected")
+                return False
+            
+            # Check 3: Boundaries must not cross or touch
+            if track_left.crosses(track_right) or track_left.intersects(track_right):
+                print(f"  Validation failed: Boundaries cross or touch")
+                return False
+            
+            # Check 4: Minimum separation with touching threshold
+            min_width = np.min(track_widths)
+            actual_min_distance = track_left.distance(track_right)
+            if actual_min_distance < 0.01:  # Less than 1cm means they're touching
+                print(f"  Validation failed: Boundaries touching (dist={actual_min_distance:.4f})")
+                return False
+            if actual_min_distance < min_width * 0.3:  # At least 30% of minimum width
+                print(f"  Validation failed: Too close (dist={actual_min_distance:.2f}, min={min_width*0.3:.2f})")
+                return False
+            
+            # Check 5: Verify boundaries are closed loops
+            if not track_left.is_ring or not track_right.is_ring:
+                print(f"  Validation failed: Not closed rings")
+                return False
 
-        # Create boundary line from boundary points
-        if len(boundary_x) > 2:
-            # Ensure closed loop by appending the first point at the end
-            if boundary_x[0] != boundary_x[-1] or boundary_y[0] != boundary_y[-1]:
-                boundary_x.append(boundary_x[0])
-                boundary_y.append(boundary_y[0])
-            return LineString(list(zip(boundary_x, boundary_y)))
-        else:
-            # Fallback to constant-width offset from the centerline
-            centerline = LineString(list(zip(x, y)))
-            distance = float(np.mean(half_widths)) if side == 'left' else -float(np.mean(half_widths))
-            return centerline.parallel_offset(distance, 'left' if distance >= 0 else 'right', join_style=2)
+            # Check 6: Ensure centerline is between boundaries using signed side tests
+            num_checks = min(len(x), 100)
+            for i in np.linspace(0, len(x)-1, num_checks, dtype=int):
+                # Local tangent using central difference
+                i_prev = (i - 1) % len(x)
+                i_next = (i + 1) % len(x)
+                tx = x[i_next] - x[i_prev]
+                ty = y[i_next] - y[i_prev]
+                t_len = np.hypot(tx, ty) + 1e-12
+                nx = -ty / t_len  # right-hand normal
+                ny = tx / t_len
+
+                cx, cy = x[i], y[i]
+                left_point = track_left.interpolate(track_left.project(Point(cx, cy)))
+                right_point = track_right.interpolate(track_right.project(Point(cx, cy)))
+
+                # Vectors from center to boundary points
+                v_left = np.array([left_point.x - cx, left_point.y - cy])
+                v_right = np.array([right_point.x - cx, right_point.y - cy])
+
+                # Signed distances using chosen normal orientation
+                d_left_signed = v_left[0] * nx + v_left[1] * ny
+                d_right_signed = v_right[0] * (-nx) + v_right[1] * (-ny)
+
+                # Both should be positive if left is on +n and right is on -n
+                if d_left_signed <= 0 or d_right_signed <= 0:
+                    print("  Validation failed: Centerline not between boundaries at some points")
+                    return False
+
+                # Also verify magnitudes roughly match half widths (with tolerance)
+                expected_half = track_widths[i] / 2.0
+                if d_left_signed < 0.2 * expected_half or d_right_signed < 0.2 * expected_half:
+                    print("  Validation failed: Boundary too close to centerline at some points")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            # If any check fails with an exception, consider track invalid
+            print(f"  Validation error: {e}")
+            return False
 
     def bounded_voronoi(self, input_points, bounding_box):
         """
@@ -219,7 +364,13 @@ class TrackGenerator:
         input_points = np.random.uniform(self._min_bound, self._max_bound, (self._n_points, 2))
         vor = self.bounded_voronoi(input_points, self._bounding_box)
 
-        while True:
+        max_attempts = 100  # Prevent infinite loop
+        attempt = 0
+
+        while attempt < max_attempts:
+            attempt += 1
+            if attempt % 10 == 0:
+                print(f"Track {self._track_id}: Attempt {attempt}/{max_attempts}...")
             
             if self._mode.value == 1:
                 # Pick a random point and find its n closest neighbours
@@ -305,15 +456,23 @@ class TrackGenerator:
             track_left = self._create_variable_width_boundary(x, y, track_widths / 2, side='left')
             track_right = self._create_variable_width_boundary(x, y, track_widths / 2, side='right')
 
-            # Validate centerline and boundaries
-            if isinstance(track_left, LineString) and isinstance(track_right, LineString):
-                left_simple = track_left.is_simple
-                right_simple = track_right.is_simple
-                center_simple = centerline.is_simple
-                separated_enough = track_left.distance(track_right) > max(0.5 * self._track_width_min, 1.0)
-                no_crossing = not track_left.crosses(track_right) and not track_left.intersects(track_right)
-                if left_simple and right_simple and center_simple and separated_enough and no_crossing:
-                    break
+            # Smoothing handled within _create_variable_width_boundary
+
+            # COMPREHENSIVE VALIDATION
+            print(f"  Checking: left_simple={track_left.is_simple}, right_simple={track_right.is_simple}")
+            print(f"  left_ring={track_left.is_ring}, right_ring={track_right.is_ring}")
+            print(f"  crosses={track_left.crosses(track_right)}")
+            print(f"  min_distance={track_left.distance(track_right):.2f}, min_width={np.min(track_widths):.2f}")
+            if self._validate_track_geometry(track_left, track_right, track_widths, x, y):
+                print(f"Track {self._track_id}: Valid track generated!")
+                break
+            else:
+                print(f"Track {self._track_id}: Invalid geometry detected, retrying with new Voronoi regions...")
+                # Continue to outer while loop to generate new track
+                continue
+
+        if attempt >= max_attempts:
+            raise Exception(f"Track {self._track_id}: Failed to generate valid track after {max_attempts} attempts. Try different parameters.")
 
         # Calculate boundary point spacing using average track width
         avg_track_width = (self._track_width_min + self._track_width_max) / 2

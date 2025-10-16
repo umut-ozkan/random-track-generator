@@ -11,6 +11,7 @@ def plot_track_from_csv(file_path, ax=None):
 
     Args:
         file_path (str): The full path to the track's CSV file.
+        ax: Optional matplotlib axes object to plot on
     """
     print(f"Visualizing track from: {os.path.basename(file_path)}")
 
@@ -25,23 +26,66 @@ def plot_track_from_csv(file_path, ax=None):
         return
 
     # Extract the centerline coordinates
-    x_center = track_df['x_m']
-    y_center = track_df['y_m']
-    heading = track_df['heading_rad']
+    x_center = track_df['x_m'].to_numpy()
+    y_center = track_df['y_m'].to_numpy()
+    heading = track_df['heading_rad'].to_numpy()
     
     # Get per-point track widths
     width_left = track_df['w_tr_left_m'].to_numpy()
     width_right = track_df['w_tr_right_m'].to_numpy()
 
-    # --- Calculate Track Boundaries ---
-    # The heading vector is (cos(h), sin(h))
-    # The normal vector (perpendicular) is (-sin(h), cos(h))
-    # We use the normal vector to offset the centerline and find the boundaries.
-    x_left = x_center - width_left * np.sin(heading)
-    y_left = y_center + width_left * np.cos(heading)
-
-    x_right = x_center + width_right * np.sin(heading)
-    y_right = y_center - width_right * np.cos(heading)
+    # --- Calculate Track Boundaries (MATCHING GENERATOR METHOD) ---
+    n_points = len(x_center)
+    x_left = np.zeros(n_points)
+    y_left = np.zeros(n_points)
+    x_right = np.zeros(n_points)
+    y_right = np.zeros(n_points)
+    
+    for i in range(n_points):
+        # Calculate tangent vector using same method as generator
+        if i == 0:
+            # Forward difference
+            dx = x_center[min(i+2, n_points-1)] - x_center[i]
+            dy = y_center[min(i+2, n_points-1)] - y_center[i]
+        elif i == n_points - 1:
+            # Backward difference
+            dx = x_center[i] - x_center[max(i-2, 0)]
+            dy = y_center[i] - y_center[max(i-2, 0)]
+        else:
+            # Central difference with wider stencil
+            i_prev = max(i-2, 0)
+            i_next = min(i+2, n_points-1)
+            dx = x_center[i_next] - x_center[i_prev]
+            dy = y_center[i_next] - y_center[i_prev]
+        
+        # Normalize tangent
+        length = np.sqrt(dx*dx + dy*dy)
+        if length > 1e-10:
+            dx_norm = dx / length
+            dy_norm = dy / length
+        else:
+            dx_norm = 0
+            dy_norm = 0
+        
+        # Perpendicular direction (rotate tangent by 90 degrees)
+        # Left side
+        perp_dx_left = dy_norm
+        perp_dy_left = -dx_norm
+        x_left[i] = x_center[i] + width_left[i] * perp_dx_left
+        y_left[i] = y_center[i] + width_left[i] * perp_dy_left
+        
+        # Right side
+        perp_dx_right = -dy_norm
+        perp_dy_right = dx_norm
+        x_right[i] = x_center[i] + width_right[i] * perp_dx_right
+        y_right[i] = y_center[i] + width_right[i] * perp_dy_right
+    
+    # Apply the same smoothing as in generator (optional, for consistency)
+    from scipy.ndimage import gaussian_filter1d
+    x_left = gaussian_filter1d(x_left, sigma=1.5, mode='wrap')
+    y_left = gaussian_filter1d(y_left, sigma=1.5, mode='wrap')
+    x_right = gaussian_filter1d(x_right, sigma=1.5, mode='wrap')
+    y_right = gaussian_filter1d(y_right, sigma=1.5, mode='wrap')
     
     # --- Create/Reuse Axes ---
     created_ax = False
@@ -56,20 +100,9 @@ def plot_track_from_csv(file_path, ax=None):
     # Plot centerline
     ax.plot(x_center, y_center, '--', color='gray', linewidth=1.5, label='Centerline')
 
-    # Plot Start/Finish line at the first centerline point using heading and widths
-    x0 = float(x_center.iloc[0])
-    y0 = float(y_center.iloc[0])
-    h0 = float(heading.iloc[0])
-    wl0 = float(width_left[0])
-    wr0 = float(width_right[0])
-    # Normal vector to heading
-    nx = -np.sin(h0)
-    ny = np.cos(h0)
-    start_left_x = x0 + nx * wl0
-    start_left_y = y0 + ny * wl0
-    start_right_x = x0 - nx * wr0
-    start_right_y = y0 - ny * wr0
-    ax.plot([start_right_x, start_left_x], [start_right_y, start_left_y], color='green', linewidth=4, label='Start/Finish Line')
+    # Plot Start/Finish line at the first centerline point
+    ax.plot([x_right[0], x_left[0]], [y_right[0], y_left[0]], 
+            color='green', linewidth=4, label='Start/Finish Line')
 
     # --- Formatting ---
     ax.set_aspect('equal', adjustable='box')
