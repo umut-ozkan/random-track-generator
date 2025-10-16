@@ -1,4 +1,4 @@
-import os, yaml
+import os, yaml, csv, math
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal, spatial, interpolate
@@ -24,6 +24,7 @@ class TrackGenerator:
                  visualise_voronoi: bool,
                  create_output_file: bool, 
                  output_location: str,
+                 track_id: int = 0,
                  z_offset: float = 0,
                  lat_offset: float = 0,
                  lon_offset: float = 0,
@@ -50,6 +51,7 @@ class TrackGenerator:
         self._visualise_voronoi = visualise_voronoi
         self._create_output_file = create_output_file
         self._output_location = output_location
+        self._track_id = track_id
         self._z_offset = z_offset
         self._lat_offset = lat_offset
         self._lon_offset = lon_offset
@@ -226,14 +228,46 @@ class TrackGenerator:
         start_heading = float(np.arctan2(*(start_line - start_position)))
 
         # Translate and rotate track to origin
-        M = transformation_matrix(-start_position, start_heading - np.pi/2)
+        # 1. Calculate heading and cumulative distance before transformation
+        heading_rad = np.arctan2(dy_dt, dx_dt)
+        segment_lengths = np.sqrt(np.diff(x)**2 + np.diff(y)**2)
+        s_m = np.concatenate(([0], np.cumsum(segment_lengths)))
+
+        # 2. Define transformation matrix
+        rotation_angle = start_heading - np.pi / 2
+        M = transformation_matrix(-start_position, rotation_angle)
+
+        # 3. Transform centerline coordinates
+        centerline_xy = np.c_[x, y, np.ones(len(x))]
+        transformed_centerline = M.dot(centerline_xy.T)[:-1].T
+        x_m = transformed_centerline[:, 0]
+        y_m = transformed_centerline[:, 1]
+
+        # 4. Transform heading
+        unwrapped_heading = np.unwrap(heading_rad)
+        transformed_unwrapped_heading = unwrapped_heading - rotation_angle
+        heading_rad_transformed = (transformed_unwrapped_heading + np.pi) % (2 * np.pi) - np.pi
+
+        # 5. Transform cones (for other output types)
         cones_left = M.dot(np.c_[cones_left, np.ones(len(cones_left))].T)[:-1].T
         cones_right = M.dot(np.c_[cones_right, np.ones(len(cones_right))].T)[:-1].T
 
         # Create track file
         if self._visualise_voronoi: self.visualise_voronoi(vor, sorted_vertices, random_point_indices, input_points, x, y)
         if self._plot_track: self.plot_track(cones_left, cones_right)
-        if self._create_output_file: self.output_yaml(cones_left.tolist(), cones_right.tolist())
+        if self._create_output_file:
+            track_data = {
+                'cones_left': cones_left,
+                'cones_right': cones_right,
+                'x_m': x_m,
+                'y_m': y_m,
+                'w_tr_right_m': self._track_width / 2.0,
+                'w_tr_left_m': self._track_width / 2.0,
+                'curvature': k,
+                'heading_rad': heading_rad_transformed,
+                's_m': s_m
+            }
+            self.create_output_file(track_data) # Call the new generalized function
 
     def visualise_voronoi(self, vor, sorted_vertices, random_point_indices, input_points, x, y):
         """
@@ -291,64 +325,84 @@ class TrackGenerator:
         plt.grid()
         plt.show()
         
-    def output_yaml(self, cones_left, cones_right):
-        """
-        Writes the track data to a yaml file.
-
-        Args:
-            cones_left (list): Nx2 list of left cone coordinates.
-            cones_right (list): Nx2 list of right cone coordinates.
-        """
+    def create_output_file(self, track_data):
+        """Writes the track data to a file based on the specified simulator type."""
         abs_path_dir = os.path.realpath(os.path.dirname(__file__))
         track_file_dir = abs_path_dir + self._output_location
-        
-        if(self._sim_type == SimType.FSSIM):
-            track_file_name = track_file_dir + 'random_track.yaml'
+        if not os.path.exists(track_file_dir):
+            os.makedirs(track_file_dir)
 
+        # --- FSSIM Output (Updated for unique filenames) ---
+        if self._sim_type == SimType.FSSIM:
+            track_file_name = os.path.join(track_file_dir, f'track_{self._track_id}.yaml')
+            print(f"Saving FSSIM track to {track_file_name}")
             with open(track_file_name, 'w') as outfile:
-                data = dict()
-                data['cones_left'] = cones_left
-                data['cones_right'] = cones_right
-                data['cones_orange'] = []
-                data['cones_orange_big'] = [[4.7, 2.5], [4.7, -2.5], [7.3, 2.5], [7.3, -2.5]]
-                data['starting_pose_cg'] = [0., 0., 0.]
-                data['tk_device'] = [[6., 3.], [6., -3.]]
+                data = {
+                    'cones_left': track_data['cones_left'].tolist(),
+                    'cones_right': track_data['cones_right'].tolist(),
+                    'cones_orange': [],
+                    'cones_orange_big': [[4.7, 2.5], [4.7, -2.5], [7.3, 2.5], [7.3, -2.5]],
+                    'starting_pose_cg': [0., 0., 0.],
+                    'tk_device': [[6., 3.], [6., -3.]]
+                }
                 yaml.dump(data, outfile)
-            
-        elif(self._sim_type == SimType.FSDS):
-            track_file_name = track_file_dir + 'random_track.csv'
-            
-            print("Saving " + track_file_name)
-            
+
+        # --- FSDS Output (Updated for unique filenames) ---
+        elif self._sim_type == SimType.FSDS:
+            track_file_name = os.path.join(track_file_dir, f'track_{self._track_id}.csv')
+            print(f"Saving FSDS track to {track_file_name}")
             with open(track_file_name, 'w') as outfile:
-                for cone in cones_left:
+                for cone in track_data['cones_left']:
                     outfile.write("blue," + str(cone[0]) + ',' + str(cone[1]) + ',0,0.01,0.01,0\n')
-                    
-                for cone in cones_right:
+
+                for cone in track_data['cones_right']:
                     outfile.write("yellow," + str(cone[0]) + ',' + str(cone[1]) + ',0,0.01,0.01,0\n')
-                    
+
                 outfile.write("big_orange,4.7,2.2,0,0.01,0.01,0\n")
                 outfile.write("big_orange,4.7,-2.2,0,0.01,0.01,0\n")
                 outfile.write("big_orange,7.3,2.2,0,0.01,0.01,0\n")
                 outfile.write("big_orange,7.3,-2.2,0,0.01,0.01,0\n")
-        elif(self._sim_type == SimType.GPX):
-            track_file_name = track_file_dir + 'random_track.gpx'
+
+        # --- GPX Output (Updated for unique filenames) ---
+        elif self._sim_type == SimType.GPX:
+            track_file_name = os.path.join(track_file_dir, f'track_{self._track_id}.gpx')
+            print(f"Saving GPX track to {track_file_name}")
             gpx = gpxpy.gpx.GPX()
 
             # Create first track in our GPX:
             gpx_track = gpxpy.gpx.GPXTrack()
             gpx.tracks.append(gpx_track)
-            
+
             # Create points:
-            for cone in cones_left:
+            for cone in track_data['cones_left']:
                 lat  = self._lat_offset  + (cone[1] / 6378100) * (180 / math.pi)
                 lon = self._lon_offset + (cone[0] / 6378100) * (180 / math.pi) / math.cos(self._lat_offset * math.pi/180)
                 gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, elevation=0 + self._z_offset))
-                
-            for cone in cones_right:
+
+            for cone in track_data['cones_right']:
                 lat  = self._lat_offset  + (cone[1] / 6378100) * (180 / math.pi)
                 lon = self._lon_offset + (cone[0] / 6378100) * (180 / math.pi) / math.cos(self._lat_offset * math.pi/180)
                 gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, elevation=0 + self._z_offset))
-            
+
             with open(track_file_name, 'w') as outfile:
                 outfile.writelines(gpx.to_xml())
+
+        # --- NEW Centerline CSV Output ---
+        elif self._sim_type == SimType.CENTERLINE_CSV:
+            track_file_name = os.path.join(track_file_dir, f'track_{self._track_id}.csv')
+            print(f"Saving Centerline track to {track_file_name}")
+            with open(track_file_name, 'w', newline='') as outfile:
+                writer = csv.writer(outfile)
+                writer.writerow(['track_id', 'x_m', 'y_m', 'w_tr_right_m', 'w_tr_left_m', 'curvature', 'heading_rad', 's_m'])
+
+                for i in range(len(track_data['x_m'])):
+                    writer.writerow([
+                        self._track_id,
+                        track_data['x_m'][i],
+                        track_data['y_m'][i],
+                        track_data['w_tr_right_m'],
+                        track_data['w_tr_left_m'],
+                        track_data['curvature'][i],
+                        track_data['heading_rad'][i],
+                        track_data['s_m'][i]
+                    ])

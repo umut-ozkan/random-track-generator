@@ -28,10 +28,15 @@ class SimType(Enum):
         Output FSSIM compatible .yaml file.
     2. FSDS:
         Output FSDS compatible .csv file 
+    3. GPX:
+        Output GPX compatible .gpx file
+    4. CENTERLINE_CSV:
+        Output CSV file with centerline coordinates.
     """
     FSSIM = 1
     FSDS = 2
     GPX = 3 
+    CENTERLINE_CSV = 4
 
 def closest_node(node, nodes, k):
     """

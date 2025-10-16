@@ -1,20 +1,34 @@
+# main.py
+import os
 from track_generator import TrackGenerator
 from utils import Mode, SimType
 
-# Input parameters
-n_points = 60
-n_regions = 20
-min_bound = 0.
-max_bound = 150.
-mode = Mode.EXTEND
-sim_type = SimType.FSDS
+def generate_multiple_tracks(n_samples: int):
+    output_dir = "/output/"
 
-# Output options
-plot_track = True
-visualise_voronoi = True
-create_output_file = True
-output_location = '/'
+    for i in range(n_samples):
+        print(f"--- Generating Track {i} ---")
+        try:
+            track_gen = TrackGenerator(
+                n_points=25,
+                n_regions=10,
+                min_bound=0,
+                max_bound=250,
+                mode=Mode.EXTEND,
+                sim_type=SimType.CENTERLINE_CSV, 
+                plot_track=True,                
+                visualise_voronoi=True,         
+                create_output_file=True,
+                output_location=output_dir,
+                track_id=i
+            )
+            track_gen.create_track()
+        except Exception as e:
+            print(f"Could not generate track {i}. Error: {e}")
+            continue
 
-# Generate track
-track_gen = TrackGenerator(n_points, n_regions, min_bound, max_bound, mode, plot_track, visualise_voronoi, create_output_file, output_location, lat_offset=51.197682, lon_offset=5.323411, sim_type=SimType.GPX)
-track_gen.create_track()
+    print(f"\nFinished generating {n_samples} tracks.")
+
+if __name__ == "__main__":
+    num_tracks_to_generate = 5
+    generate_multiple_tracks(num_tracks_to_generate)
