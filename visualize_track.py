@@ -4,7 +4,7 @@ import numpy as np
 import os
 import glob
 
-def plot_track_from_csv(file_path):
+def plot_track_from_csv(file_path, ax=None):
     """
     Reads track data from a CSV file and plots the centerline, boundaries,
     and start/finish line.
@@ -43,16 +43,19 @@ def plot_track_from_csv(file_path):
     x_right = x_center + width_right * np.sin(heading)
     y_right = y_center - width_right * np.cos(heading)
     
-    # --- Create the Plot ---
-    plt.figure(figsize=(12, 12))
-    
+    # --- Create/Reuse Axes ---
+    created_ax = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(12, 12))
+        created_ax = True
+
     # Plot track boundaries
-    plt.plot(x_left, y_left, color='black', linewidth=2, label='Track Boundary')
-    plt.plot(x_right, y_right, color='black', linewidth=2)
-    
+    ax.plot(x_left, y_left, color='black', linewidth=2, label='Track Boundary')
+    ax.plot(x_right, y_right, color='black', linewidth=2)
+
     # Plot centerline
-    plt.plot(x_center, y_center, '--', color='gray', linewidth=1.5, label='Centerline')
-    
+    ax.plot(x_center, y_center, '--', color='gray', linewidth=1.5, label='Centerline')
+
     # Plot Start/Finish line at the first centerline point using heading and widths
     x0 = float(x_center.iloc[0])
     y0 = float(y_center.iloc[0])
@@ -66,15 +69,18 @@ def plot_track_from_csv(file_path):
     start_left_y = y0 + ny * wl0
     start_right_x = x0 - nx * wr0
     start_right_y = y0 - ny * wr0
-    plt.plot([start_right_x, start_left_x], [start_right_y, start_left_y], color='green', linewidth=4, label='Start/Finish Line')
-    
+    ax.plot([start_right_x, start_left_x], [start_right_y, start_left_y], color='green', linewidth=4, label='Start/Finish Line')
+
     # --- Formatting ---
-    plt.axis('equal')  # Ensures the track aspect ratio is correct
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.title(f"Track Visualization: {os.path.basename(file_path)}")
-    plt.xlabel("X [m]")
-    plt.ylabel("Y [m]")
-    plt.legend()
+    ax.set_aspect('equal', adjustable='box')
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.set_title(f"Track Visualization: {os.path.basename(file_path)}")
+    ax.set_xlabel("X [m]")
+    ax.set_ylabel("Y [m]")
+    ax.legend()
+
+    if created_ax:
+        plt.show()
 
 
 def main():
@@ -95,12 +101,25 @@ def main():
         print("Please make sure you have generated the tracks first.")
         return
 
-    # Generate a plot for each file
-    for file_path in csv_files:
-        plot_track_from_csv(file_path)
-
-    # Show all the plots
-    plt.show()
+    # Show tracks sequentially in a single window
+    plt.ion()
+    fig, ax = plt.subplots(figsize=(12, 12))
+    # Ensure window is shown non-blocking once
+    plt.show(block=False)
+    try:
+        for idx, file_path in enumerate(csv_files):
+            ax.clear()
+            plot_track_from_csv(file_path, ax=ax)
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+            # Allow GUI event loop to process so the figure refreshes
+            plt.pause(0.05)
+            user_input = input("Press Enter for next track, or 'q' then Enter to quit: ")
+            if user_input.strip().lower().startswith('q'):
+                break
+    finally:
+        plt.ioff()
+        plt.close(fig)
 
 
 if __name__ == "__main__":
