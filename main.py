@@ -15,12 +15,14 @@ def generate_multiple_tracks(n_samples: int):
                 min_bound=0,
                 max_bound=250,
                 mode=Mode.EXTEND,
-                sim_type=SimType.CENTERLINE_CSV, 
-                plot_track=True,                
-                visualise_voronoi=True,         
+                sim_type=SimType.CENTERLINE_CSV,
+                plot_track=True,
+                visualise_voronoi=True,
                 create_output_file=True,
                 output_location=output_dir,
-                track_id=i
+                track_id=i,
+                track_width_min=10.0,
+                track_width_max=15.0
             )
             track_gen.create_track()
         except Exception as e:

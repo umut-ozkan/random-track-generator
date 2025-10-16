@@ -2,7 +2,8 @@ import os, yaml, csv, math
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal, spatial, interpolate
-from shapely.geometry.polygon import Point, LineString, Polygon
+from shapely.geometry.polygon import Point, Polygon
+from shapely.geometry import LineString
 from utils import *
 import math
 import gpxpy
@@ -14,21 +15,23 @@ class TrackGenerator:
     Ensures that the tracks curvature is within limits and that the car starts at a straight section.
     """
 
-    def __init__(self, 
-                 n_points: int, 
-                 n_regions: int, 
-                 min_bound: float, 
-                 max_bound: float, 
-                 mode: Mode, 
-                 plot_track: bool, 
+    def __init__(self,
+                 n_points: int,
+                 n_regions: int,
+                 min_bound: float,
+                 max_bound: float,
+                 mode: Mode,
+                 plot_track: bool,
                  visualise_voronoi: bool,
-                 create_output_file: bool, 
+                 create_output_file: bool,
                  output_location: str,
                  track_id: int = 0,
                  z_offset: float = 0,
                  lat_offset: float = 0,
                  lon_offset: float = 0,
-                 sim_type: SimType = SimType.FSSIM):
+                 sim_type: SimType = SimType.FSSIM,
+                 track_width_min: float = 10.0,
+                 track_width_max: float = 15.0):
                  
         # Input parameters
         self._n_points = n_points                                               # [-]
@@ -40,11 +43,12 @@ class TrackGenerator:
         self._sim_type = sim_type
 
         # Track parameters
-        self._track_width = 3.                                                  # [m]
-        self._boundary_point_spacing = 10.0                                     # [m]
-        self._length_start_area = 20.0                                          # [m]
-        self._curvature_threshold = 1. / 25.0                                   # [m^-1]
-        self._straight_threshold = 1. / 500.0                                   # [m^-1]
+        self._track_width_min = track_width_min                                 # [m]
+        self._track_width_max = track_width_max                                 # [m]
+        self._boundary_point_spacing = 5.0                                     # [m]
+        self._length_start_area = 6.0                                          # [m]
+        self._curvature_threshold = 1. / 3.75                                   # [m^-1]
+        self._straight_threshold = 1. / 100.                                    # [m^-1]
 
         # Output options
         self._plot_track = plot_track
@@ -55,6 +59,108 @@ class TrackGenerator:
         self._z_offset = z_offset
         self._lat_offset = lat_offset
         self._lon_offset = lon_offset
+
+    def calculate_variable_track_width(self, curvature, num_points=1000):
+        """
+        Calculate variable track width based on curvature.
+        Straights get wider tracks, tight corners get narrower tracks.
+
+        Args:
+            curvature (numpy.ndarray): Curvature values along the track
+            num_points (int): Number of points to interpolate to
+
+        Returns:
+            numpy.ndarray: Variable track widths along the track
+        """
+        # Normalize curvature to 0-1 range (higher curvature = narrower track)
+        max_curvature = np.max(np.abs(curvature))
+        if max_curvature == 0:
+            # If no curvature variation, use constant width
+            return np.full(num_points, (self._track_width_min + self._track_width_max) / 2)
+
+        # Create normalized curvature (0 = straight, 1 = tightest corner)
+        normalized_curvature = np.abs(curvature) / max_curvature
+
+        # Apply smooth transition using sigmoid-like function
+        # Straights (low curvature) -> wide track
+        # Tight corners (high curvature) -> narrow track
+        width_range = self._track_width_max - self._track_width_min
+        track_widths = self._track_width_max - width_range * (normalized_curvature ** 1.5)
+
+        # Ensure minimum width is respected
+        track_widths = np.maximum(track_widths, self._track_width_min)
+
+        return track_widths
+
+    def _create_variable_width_boundary(self, x, y, half_widths, side='left'):
+        """
+        Create a boundary line parallel to the centerline with variable width.
+
+        Args:
+            x, y (numpy.ndarray): Centerline coordinates
+            half_widths (numpy.ndarray): Half-width values for each point
+            side (str): 'left' or 'right' side of the centerline
+
+        Returns:
+            shapely.geometry.LineString: The boundary line
+        """
+        # Create points for the boundary by offsetting perpendicular to the centerline
+        boundary_x = []
+        boundary_y = []
+
+        for i in range(len(x)):
+            # Get current point and tangent direction
+            if i == 0:
+                # Use forward difference for first point
+                dx = x[1] - x[0]
+                dy = y[1] - y[0]
+            elif i == len(x) - 1:
+                # Use backward difference for last point
+                dx = x[-1] - x[-2]
+                dy = y[-1] - y[-2]
+            else:
+                # Use central difference for middle points
+                dx = x[i+1] - x[i-1]
+                dy = y[i+1] - y[i-1]
+
+            # Normalize tangent vector
+            length = np.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                dx_norm = dx / length
+                dy_norm = dy / length
+            else:
+                dx_norm = 0
+                dy_norm = 0
+
+            # Perpendicular direction (rotate 90 degrees)
+            # For 'left' side: rotate clockwise (negative)
+            # For 'right' side: rotate counter-clockwise (positive)
+            if side == 'left':
+                perp_dx = dy_norm
+                perp_dy = -dx_norm
+            else:  # right side
+                perp_dx = -dy_norm
+                perp_dy = dx_norm
+
+            # Offset point by half-width in perpendicular direction
+            offset_x = x[i] + half_widths[i] * perp_dx
+            offset_y = y[i] + half_widths[i] * perp_dy
+
+            boundary_x.append(offset_x)
+            boundary_y.append(offset_y)
+
+        # Create boundary line from boundary points
+        if len(boundary_x) > 2:
+            # Ensure closed loop by appending the first point at the end
+            if boundary_x[0] != boundary_x[-1] or boundary_y[0] != boundary_y[-1]:
+                boundary_x.append(boundary_x[0])
+                boundary_y.append(boundary_y[0])
+            return LineString(list(zip(boundary_x, boundary_y)))
+        else:
+            # Fallback to constant-width offset from the centerline
+            centerline = LineString(list(zip(x, y)))
+            distance = float(np.mean(half_widths)) if side == 'left' else -float(np.mean(half_widths))
+            return centerline.parallel_offset(distance, 'left' if distance >= 0 else 'right', join_style=2)
 
     def bounded_voronoi(self, input_points, bounding_box):
         """
@@ -185,23 +291,38 @@ class TrackGenerator:
                 else:
                     break
             
-            # Create track boundaries
-            track = Polygon(zip(x, y))
-            track_left = track.buffer(self._track_width / 2)
-            track_right = track.buffer(-self._track_width / 2)
-            
-            # Check if track does not cross itself
-            if track.is_valid and track_left.is_valid and track_right.is_valid:
-                if track.geom_type == track_left.geom_type == track_right.geom_type == 'Polygon':
+            # Calculate variable track widths based on curvature
+            track_widths = self.calculate_variable_track_width(k)
+
+            # Create centerline and boundaries using variable widths
+            centerline = LineString(list(zip(x, y)))
+
+            # Ensure centerline is a closed loop and simple (no self-intersections)
+            is_closed = centerline.is_ring
+            if not is_closed:
+                centerline = LineString(list(zip(np.r_[x, x[0]], np.r_[y, y[0]])))
+
+            track_left = self._create_variable_width_boundary(x, y, track_widths / 2, side='left')
+            track_right = self._create_variable_width_boundary(x, y, track_widths / 2, side='right')
+
+            # Validate centerline and boundaries
+            if isinstance(track_left, LineString) and isinstance(track_right, LineString):
+                left_simple = track_left.is_simple
+                right_simple = track_right.is_simple
+                center_simple = centerline.is_simple
+                separated_enough = track_left.distance(track_right) > max(0.5 * self._track_width_min, 1.0)
+                no_crossing = not track_left.crosses(track_right) and not track_left.intersects(track_right)
+                if left_simple and right_simple and center_simple and separated_enough and no_crossing:
                     break
 
-        # Calculate boundary point spacing
-        boundary_point_spacing_left = np.linspace(0, track_left.length, np.ceil(track_left.length / self._track_width).astype(int) + 1)[:-1]
-        boundary_point_spacing_right= np.linspace(0, track_right.length, np.ceil(track_right.length / self._track_width).astype(int) + 1)[:-1]
+        # Calculate boundary point spacing using average track width
+        avg_track_width = (self._track_width_min + self._track_width_max) / 2
+        boundary_point_spacing_left = np.linspace(0, track_left.length, np.ceil(track_left.length / avg_track_width).astype(int) + 1)[:-1]
+        boundary_point_spacing_right= np.linspace(0, track_right.length, np.ceil(track_right.length / avg_track_width).astype(int) + 1)[:-1]
 
         # Determine coordinates of boundary points
-        boundary_points_left = np.asarray([np.asarray(track_left.exterior.interpolate(sp).xy).flatten() for sp in boundary_point_spacing_left])
-        boundary_points_right = np.asarray([np.asarray(track_right.exterior.interpolate(sp).xy).flatten() for sp in boundary_point_spacing_right])
+        boundary_points_left = np.asarray([[track_left.interpolate(sp).x, track_left.interpolate(sp).y] for sp in boundary_point_spacing_left])
+        boundary_points_right = np.asarray([[track_right.interpolate(sp).x, track_right.interpolate(sp).y] for sp in boundary_point_spacing_right])
 
         # Find straight section in track that is at least the length of the start area
         # If such a section cannot be found, adjust the straight_threshold and length_start_area variables
@@ -223,8 +344,12 @@ class TrackGenerator:
         except IndexError:
             raise Exception("Unable to find suitable starting position. Try to decrease the length of the starting area or different input parameters.")
         start_line = np.array([x[start_line_index], y[start_line_index]])
-        start_position = np.asarray(track.exterior.interpolate(np.sum(distances[:start_line_index]) - length_start_area)).flatten()
-        start_position = np.array([start_position[0].x, start_position[0].y]) 
+        s_target = float(np.sum(distances[:start_line_index]) - length_start_area)
+        # Wrap around if negative
+        if s_target < 0:
+            s_target = centerline.length + s_target
+        p_start = centerline.interpolate(s_target)
+        start_position = np.array([p_start.x, p_start.y])
         start_heading = float(np.arctan2(*(start_line - start_position)))
 
         # Translate and rotate track to origin
@@ -271,13 +396,17 @@ class TrackGenerator:
         if self._visualise_voronoi: self.visualise_voronoi(vor, sorted_vertices, random_point_indices, input_points, x, y)
         if self._plot_track: self.plot_track(boundary_points_left, boundary_points_right)
         if self._create_output_file:
+            # Calculate variable track widths for output (interpolated to match centerline points)
+            centerline_track_widths = self.calculate_variable_track_width(k, len(x_m))
+
             track_data = {
                 'boundary_points_left': boundary_points_left,
                 'boundary_points_right': boundary_points_right,
                 'x_m': x_m,
                 'y_m': y_m,
-                'w_tr_right_m': self._track_width / 2.0,
-                'w_tr_left_m': self._track_width / 2.0,
+                'w_tr_right_m': centerline_track_widths / 2.0,
+                'w_tr_left_m': centerline_track_widths / 2.0,
+                'track_widths': centerline_track_widths,
                 'curvature': k,
                 'heading_rad': heading_rad_transformed,
                 's_m': s_m
@@ -409,15 +538,16 @@ class TrackGenerator:
             print(f"Saving Centerline track to {track_file_name}")
             with open(track_file_name, 'w', newline='') as outfile:
                 writer = csv.writer(outfile)
-                writer.writerow(['track_id', 'x_m', 'y_m', 'w_tr_right_m', 'w_tr_left_m', 'curvature', 'heading_rad', 's_m'])
+                writer.writerow(['track_id', 'x_m', 'y_m', 'w_tr_right_m', 'w_tr_left_m', 'track_width_m', 'curvature', 'heading_rad', 's_m'])
 
                 for i in range(len(track_data['x_m'])):
                     writer.writerow([
                         self._track_id,
                         track_data['x_m'][i],
                         track_data['y_m'][i],
-                        track_data['w_tr_right_m'],
-                        track_data['w_tr_left_m'],
+                        track_data['w_tr_right_m'][i],
+                        track_data['w_tr_left_m'][i],
+                        track_data['track_widths'][i],
                         track_data['curvature'][i],
                         track_data['heading_rad'][i],
                         track_data['s_m'][i]
